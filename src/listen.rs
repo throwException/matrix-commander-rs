@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 // use thiserror::Error;
 // use directories::ProjectDirs;
 // use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use matrix_sdk::{
     config::SyncSettings,
@@ -81,6 +82,7 @@ use matrix_sdk::{
         UInt,
     },
     Client,
+    LoopCtrl,
 };
 
 /// Declare the items used from main.rs
@@ -382,31 +384,35 @@ async fn handle_syncroommessageevent(
         debug!("Skipping message from itself because --listen-self is not set.");
         return;
     }
-    if !context.output.is_text() {
-        // Serialize it to a JSON string.
-        let j = match serde_json::to_string("") {
-            Ok(jsonstr) => {
-                // this event does not contain the room_id, other events do.
-                // People are missing the room_id in output.
-                // Nasty hack: inserting the room_id into the JSON string.
-                let mut s = jsonstr;
-                s.insert_str(s.len() - 1, ",\"event_id\":\"\"");
-                s.insert_str(s.len() - 2, ev.event_id().as_str());
-                s.insert_str(s.len() - 1, ",\"sender\":\"\"");
-                s.insert_str(s.len() - 2, ev.sender().as_str());
-                s.insert_str(s.len() - 1, ",\"origin_server_ts\":\"\"");
-                s.insert_str(s.len() - 2, &ev.origin_server_ts().0.to_string());
-                s.insert_str(s.len() - 1, ",\"room_id\":\"\"");
-                s.insert_str(s.len() - 2, room.room_id().as_str());
-                s
-            }
-            Err(e) => e.to_string(),
-        };
-        println!("{}", j);
-        return;
-    }
     match ev {
-        SyncMessageLikeEvent::Original(orginialmessagelikeevent) => {
+        SyncMessageLikeEvent::Original(ref orginialmessagelikeevent) => {
+            if !context.output.is_text() {
+                // Serialize it to a JSON string.
+                let j = match serde_json::to_string(&orginialmessagelikeevent.content) {
+                    Ok(jsonstr) => {
+                        // this event does not contain the room_id, other events do.
+                        // People are missing the room_id in output.
+                        // Nasty hack: inserting the room_id into the JSON string.
+                        let mut s = "{".to_string();
+                        s.push_str("\"type\": \"\", ");
+                        s.insert_str(s.len() - 3, &ev.event_type().to_string());
+                        s.push_str("\"event_id\": \"\", ");
+                        s.insert_str(s.len() - 3, orginialmessagelikeevent.event_id.as_str());
+                        s.push_str("\"sender\": \"\", ");
+                        s.insert_str(s.len() - 3, orginialmessagelikeevent.sender.as_str());
+                        s.push_str("\"origin_server_ts\": \"\", ");
+                        s.insert_str(s.len() - 3, &orginialmessagelikeevent.origin_server_ts.0.to_string());
+                        s.push_str("\"room_id\": \"\", ");
+                        s.insert_str(s.len() - 3, room.room_id().as_str());
+                        s.push_str("\"content\": }");
+                        s.insert_str(s.len() - 1, &jsonstr);
+                        s
+                    }
+                    Err(e) => e.to_string(),
+                };
+                println!("{}", j);
+                return;
+            }
             handle_originalsyncmessagelikeevent(
                 &orginialmessagelikeevent,
                 &RoomId::parse(room.room_id()).unwrap(),
@@ -501,9 +507,10 @@ pub(crate) async fn listen_once(
 
     // get the current sync state from server before syncing
     // This gets all rooms but ignores msgs from itself.
-    let settings = SyncSettings::default();
+    let settings = SyncSettings::default()
+        .timeout(Duration::from_secs(1));
 
-    client.sync_once(settings).await?;
+    client.sync_with_callback(settings, |_| async { LoopCtrl::Break }).await?;
     Ok(())
 }
 
